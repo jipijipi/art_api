@@ -1,147 +1,77 @@
-from flask import Flask, jsonify, request
-from sqlalchemy import create_engine, MetaData, Table, Column, Integer, String, DateTime, text
-from datetime import datetime
+from flask import Flask, jsonify
+from dotenv import load_dotenv
+from sqlalchemy import create_engine, Table, Column, String, Integer, Boolean, DateTime, MetaData, select, func, text
+import random
+from urllib.parse import quote_plus
+import os
 
 app = Flask(__name__)
 
-# Database configuration
-engine = create_engine('sqlite:///local.db', echo=True)
-metadata = MetaData()
+load_dotenv()
+password = os.getenv('PASSWORD')
 
-# Define items table
-items = Table('items', metadata,
-    Column('id', Integer, primary_key=True),
-    Column('name', String(100), nullable=False),
-    Column('description', String(200)),
-    Column('created_at', DateTime, default=datetime.utcnow)
-)
+engine = create_engine(f'mysql+pymysql://root:{password}@localhost/art_and_food_db')
 
-# Create all tables
-metadata.create_all(engine)
-
-def row_to_dict(row):
-    return {
-        'id': row.id,
-        'name': row.name,
-        'description': row.description,
-        'created_at': row.created_at.isoformat() if row.created_at else None
-    }
-
-@app.route('/')
-def home():
-    return "Welcome to the Flask API!"
-
-@app.route('/api/items', methods=['GET'])
-def get_items():
-    with engine.connect() as conn:
-        result = conn.execute(items.select())
-        items_list = [row_to_dict(row) for row in result]
-        return jsonify(items_list)
-
-@app.route('/api/items/<int:item_id>', methods=['GET'])
-def get_item(item_id):
-    with engine.connect() as conn:
-        result = conn.execute(
-            items.select().where(items.c.id == item_id)
-        ).first()
+@app.route('/api/paintings/food/random', methods=['GET'])
+def get_random_paintings_with_food():
+    """Get 10 random paintings containing food"""
+    try:
+        query = text("""
+            SELECT p.painting_id, p.title, p.image_url
+            FROM paintings p
+            JOIN food_detected f ON p.painting_id = f.painting_id
+            WHERE f.food_detected = 1
+            ORDER BY RAND()
+            LIMIT 10
+        """)
         
-        if result is None:
-            return jsonify({'error': 'Item not found'}), 404
+        with engine.connect() as conn:
+            result = conn.execute(query)
+            paintings = []
+            for row in result:
+                paintings.append({
+                    'painting_id': row[0],
+                    'title': row[1],
+                    'image_url': row[2]
+                })
             
-        return jsonify(row_to_dict(result))
+            if not paintings:
+                return jsonify({
+                    'error': 'No paintings with food detected found in database'
+                }), 404
+            
+            return jsonify(paintings)
+            
+    except Exception as e:
+        return jsonify({
+            'error': f'An error occurred: {str(e)}'
+        }), 500
 
-@app.route('/api/items', methods=['POST'])
-def create_item():
-    data = request.get_json()
-    
-    if not data or 'name' not in data:
-        return jsonify({'error': 'Name is required'}), 400
-    
-    with engine.connect() as conn:
-        # Insert new item
-        result = conn.execute(
-            items.insert().values(
-                name=data['name'],
-                description=data.get('description', ''),
-                created_at=datetime.utcnow()
-            )
-        )
-        conn.commit()
+@app.route('/api/paintings/food/count', methods=['GET'])
+def get_paintings_with_food_count():
+    """Get the total count of paintings containing food"""
+    try:
+        query = text("""
+            SELECT COUNT(*) as total
+            FROM paintings p
+            JOIN food_detected f ON p.painting_id = f.painting_id
+            WHERE f.food_detected = 1
+        """)
         
-        # Fetch the created item
-        new_item = conn.execute(
-            items.select().where(items.c.id == result.inserted_primary_key[0])
-        ).first()
-        
-        return jsonify(row_to_dict(new_item)), 201
+        with engine.connect() as conn:
+            result = conn.execute(query)
+            count = result.scalar()
+            
+            return jsonify({
+                'total_paintings_with_food': count
+            })
+            
+    except Exception as e:
+        return jsonify({
+            'error': f'An error occurred: {str(e)}'
+        }), 500
 
-@app.route('/api/items/<int:item_id>', methods=['PUT'])
-def update_item(item_id):
-    data = request.get_json()
-    
-    if not data:
-        return jsonify({'error': 'No data provided'}), 400
-    
-    with engine.connect() as conn:
-        # Check if item exists
-        existing_item = conn.execute(
-            items.select().where(items.c.id == item_id)
-        ).first()
-        
-        if existing_item is None:
-            return jsonify({'error': 'Item not found'}), 404
-        
-        # Prepare update values
-        update_values = {}
-        if 'name' in data:
-            update_values['name'] = data['name']
-        if 'description' in data:
-            update_values['description'] = data['description']
-        
-        # Update item
-        conn.execute(
-            items.update()
-            .where(items.c.id == item_id)
-            .values(**update_values)
-        )
-        conn.commit()
-        
-        # Fetch updated item
-        updated_item = conn.execute(
-            items.select().where(items.c.id == item_id)
-        ).first()
-        
-        return jsonify(row_to_dict(updated_item))
 
-@app.route('/api/items/<int:item_id>', methods=['DELETE'])
-def delete_item(item_id):
-    with engine.connect() as conn:
-        # Check if item exists
-        existing_item = conn.execute(
-            items.select().where(items.c.id == item_id)
-        ).first()
-        
-        if existing_item is None:
-            return jsonify({'error': 'Item not found'}), 404
-        
-        # Delete item
-        conn.execute(items.delete().where(items.c.id == item_id))
-        conn.commit()
-        
-        return jsonify({'message': 'Item deleted successfully'}), 200
-
-@app.route('/api/search', methods=['GET'])
-def search_items():
-    search_term = request.args.get('q', '')
-    
-    with engine.connect() as conn:
-        query = items.select().where(
-            items.c.name.ilike(f'%{search_term}%') |
-            items.c.description.ilike(f'%{search_term}%')
-        )
-        result = conn.execute(query)
-        items_list = [row_to_dict(row) for row in result]
-        return jsonify(items_list)
 
 if __name__ == '__main__':
-    app.run(debug=True, port=5001)
+    app.run(debug=True)
